@@ -1,0 +1,81 @@
+name: Sync and Test Upstream Rules
+
+on:
+  schedule:
+    # Run weekly on Monday
+    - cron: '0 16 * * 1'
+  workflow_dispatch:
+
+jobs:
+  sync-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Grant write permission to push to the meta branch
+    steps:
+      - name: 1. Checkout Test Runner
+        uses: actions/checkout@v4
+        with:
+          # Checkout the repo that contains the test script and workflow
+          path: main_repo
+
+      - name: 2. Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.3.5"
+
+      - name: 3. Install Mihomo
+        run: |
+          MIHOMO_LATEST_URL=$(curl -s "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest" | jq -r '.assets[] | select(.name | contains("linux-amd64-compatible")) | .browser_download_url')
+          echo "Downloading Mihomo from: $MIHOMO_LATEST_URL"
+          curl -L -o mihomo.gz "$MIHOMO_LATEST_URL"
+          gunzip mihomo.gz
+          chmod +x mihomo
+          sudo mv mihomo /usr/local/bin/
+          echo "Mihomo version:"
+          mihomo -v
+
+      - name: 4. Clone Upstream Rules and Download Additional MRS
+        run: |
+          git clone --depth 1 --branch meta https://github.com/MetaCubeX/meta-rules-dat.git upstream_rules
+          mv upstream_rules main_repo/meta-rules-dat-meta
+          
+          # Create the geosite directory if it doesn't exist (though it should)
+          mkdir -p main_repo/meta-rules-dat-meta/geo/geosite/
+          
+          # Download the additional MRS file
+          ADDITIONAL_MRS_URL="https://raw.githubusercontent.com/privacy-protection-tools/anti-ad.github.io/master/docs/mihomo.mrs"
+          curl -L -o main_repo/meta-rules-dat-meta/geo/geosite/anti-ad.mrs "$ADDITIONAL_MRS_URL"
+          echo "Downloaded additional MRS: anti-ad.mrs"
+        
+      - name: 5. Run Tests
+        working-directory: ./main_repo
+        run: bun run ./test-mrs.js
+      
+      - name: 6. Commit and Push to Meta Branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Create a new directory for the meta branch content
+          mkdir meta_branch_content
+
+          # Copy only the geo/**/*.mrs files into it
+          cd main_repo/meta-rules-dat-meta
+          find geo -type f -name "*.mrs" -exec cp --parents {} ../../meta_branch_content/ \;
+          cd ../..
+
+          # Initialize a new git repo and force push
+          cd meta_branch_content
+          git init
+          git checkout -b meta
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          # Check if there's anything to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Sync: Update geo/**/*.mrs rules from MetaCubeX/meta-rules-dat"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          git push --force origin meta
